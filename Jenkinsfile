@@ -31,9 +31,8 @@ pipeline {
                         docker login -u %DOCKER_USER% -p %DOCKER_PASS%
                         docker build -t %IMAGE_NAME% .
                         docker tag %IMAGE_NAME% %DOCKER_HUB_REPO%:%DOCKER_TAG%
-                        echo "Docker image built and tagged successfully!"
-                        echo "Skipping push to Docker Hub (uncomment below line when ready)"
-                        REM docker push %DOCKER_HUB_REPO%:%DOCKER_TAG%
+                        docker push %DOCKER_HUB_REPO%:%DOCKER_TAG%
+                        echo "Docker image pushed successfully!"
                         '''
                     }
                 }
@@ -43,32 +42,8 @@ pipeline {
         stage('Kubernetes Deployment') {
             steps {
                 script {
-                    echo "Deploying to Kubernetes using kubeconfig credentials..."
-                    withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
-                        try {
-                            bat 'kubectl config current-context'
-                            bat 'kubectl cluster-info --request-timeout=10s'
-                            bat 'kubectl get nodes'
-
-                            echo "Creating namespace if not exists..."
-                            bat 'kubectl create namespace ci-cd-app --dry-run=client -o yaml | kubectl apply -f -'
-
-                            echo "Applying Kubernetes manifests..."
-                            bat '''
-                                kubectl apply -f k8s/deployment.yaml -n ci-cd-app
-                                kubectl apply -f k8s/service.yaml -n ci-cd-app
-                                kubectl rollout status deployment/ci-cd-app -n ci-cd-app --timeout=300s
-                            '''
-
-                            echo "Kubernetes deployment successful!"
-                            bat 'kubectl get services ci-cd-app-service -n ci-cd-app'
-                            bat 'kubectl get pods -n ci-cd-app -l app=ci-cd-app'
-                        } catch (Exception e) {
-                            echo "Kubernetes deployment failed: ${e.getMessage()}"
-                            currentBuild.result = 'UNSTABLE'
-                            echo "Continuing build despite Kubernetes deployment issues"
-                        }
-                    }
+                    echo "Skipping Kubernetes deployment (credentials not configured)"
+                    echo "To enable: Add 'kubeconfig-minikube' credentials in Jenkins"
                 }
             }
         }
