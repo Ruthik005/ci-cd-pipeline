@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         IMAGE_NAME = "ci-cd-app"
-        DOCKER_HUB_REPO = "koushiksagar/ci-cd-app"
+        DOCKER_HUB_REPO = "sriman05/ci-cd-app"
         DOCKER_TAG = "latest"
         BACKEND_URL = "${env.BACKEND_URL ?: 'http://localhost:3001'}"
     }
