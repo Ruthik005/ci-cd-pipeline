@@ -97,18 +97,14 @@ pipeline {
                     try {
                         // Run Trivy scan for HIGH and CRITICAL vulnerabilities
                         def trivyResult = bat(
-                            script: """
-                                trivy image --severity HIGH,CRITICAL --exit-code 0 --format table %DOCKER_HUB_REPO%:%DOCKER_TAG%
-                            """,
+                            script: 'C:\\Tools\\Trivy\\trivy.exe image --severity HIGH,CRITICAL --exit-code 0 --format table %DOCKER_HUB_REPO%:%DOCKER_TAG%',
                             returnStdout: true
                         )
                         echo trivyResult
                         
                         // Check for CRITICAL vulnerabilities (fail pipeline)
                         def criticalScan = bat(
-                            script: """
-                                trivy image --severity CRITICAL --exit-code 1 %DOCKER_HUB_REPO%:%DOCKER_TAG% 2>&1
-                            """,
+                            script: 'C:\\Tools\\Trivy\\trivy.exe image --severity CRITICAL --exit-code 1 %DOCKER_HUB_REPO%:%DOCKER_TAG% 2>&1',
                             returnStatus: true
                         )
                         
