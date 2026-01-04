@@ -263,22 +263,9 @@ pipeline {
                 withCredentials([string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_API_TOKEN')]) {
                     try {
                         def jsonString = groovy.json.JsonOutput.toJson(jsonBody)
-                        // Use PowerShell to send HTTP request (no plugin needed)
-                        bat """
-                            powershell -Command "& {
-                                \$body = '${jsonString.replace("'", "''")}'
-                                \$headers = @{
-                                    'Authorization' = 'Bearer %JENKINS_API_TOKEN%'
-                                    'Content-Type' = 'application/json'
-                                }
-                                try {
-                                    Invoke-RestMethod -Uri '%BACKEND_URL%/api/log-final-status' -Method POST -Body \$body -Headers \$headers -TimeoutSec 30
-                                    Write-Host 'Build status sent successfully'
-                                } catch {
-                                    Write-Host 'Failed to send status:' \$_.Exception.Message
-                                }
-                            }"
-                        """
+                        // Escape quotes for PowerShell and write to temp file
+                        def escapedJson = jsonString.replace('"', '\\"').replace("'", "''")
+                        bat """powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-RestMethod -Uri '%BACKEND_URL%/api/log-final-status' -Method POST -ContentType 'application/json' -Headers @{'Authorization'='Bearer %JENKINS_API_TOKEN%'} -Body '${escapedJson}' -TimeoutSec 30; Write-Host 'Status sent' } catch { Write-Host 'Send failed' }" """
                         echo "Build status sent successfully to backend."
                     } catch (Exception e) {
                         echo "Failed to send build status to backend: ${e.getMessage()}"
