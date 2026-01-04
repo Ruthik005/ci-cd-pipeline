@@ -262,15 +262,23 @@ pipeline {
 
                 withCredentials([string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_API_TOKEN')]) {
                     try {
-                        httpRequest(
-                            url: "${env.BACKEND_URL}/api/log-final-status",
-                            httpMode: 'POST',
-                            contentType: 'APPLICATION_JSON',
-                            requestBody: groovy.json.JsonOutput.toJson(jsonBody),
-                            customHeaders: [[name: 'Authorization', value: "Bearer ${JENKINS_API_TOKEN}"]],
-                            validResponseCodes: '100:399',
-                            timeout: 30
-                        )
+                        def jsonString = groovy.json.JsonOutput.toJson(jsonBody)
+                        // Use PowerShell to send HTTP request (no plugin needed)
+                        bat """
+                            powershell -Command "& {
+                                \$body = '${jsonString.replace("'", "''")}'
+                                \$headers = @{
+                                    'Authorization' = 'Bearer %JENKINS_API_TOKEN%'
+                                    'Content-Type' = 'application/json'
+                                }
+                                try {
+                                    Invoke-RestMethod -Uri '%BACKEND_URL%/api/log-final-status' -Method POST -Body \$body -Headers \$headers -TimeoutSec 30
+                                    Write-Host 'Build status sent successfully'
+                                } catch {
+                                    Write-Host 'Failed to send status:' \$_.Exception.Message
+                                }
+                            }"
+                        """
                         echo "Build status sent successfully to backend."
                     } catch (Exception e) {
                         echo "Failed to send build status to backend: ${e.getMessage()}"
