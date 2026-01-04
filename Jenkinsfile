@@ -8,7 +8,7 @@ pipeline {
 
     environment {
         IMAGE_NAME = "ci-cd-app"
-        DOCKER_HUB_REPO = "sriman05/ci-cd-app"
+        DOCKER_HUB_REPO = "ruthik005/ci-cd-app"
         DOCKER_TAG = "latest"
         BACKEND_URL = "${env.BACKEND_URL ?: 'http://localhost:3001'}"
     }
@@ -128,7 +128,7 @@ pipeline {
         stage('Docker Push') {
             steps {
                 dir('app') {
-                    withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                         bat '''
                             docker login -u %DOCKER_USER% -p %DOCKER_PASS%
                             docker push %DOCKER_HUB_REPO%:%DOCKER_TAG%
