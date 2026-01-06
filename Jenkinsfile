@@ -4,6 +4,9 @@ pipeline {
     parameters {
         booleanParam(name: 'RUN_CHAOS_TEST', defaultValue: false, description: 'Run Chaos Engineering tests after deployment')
         booleanParam(name: 'SKIP_SECURITY_SCAN', defaultValue: false, description: 'Skip security scans (not recommended)')
+        choice(name: 'DEPLOY_STRATEGY', choices: ['standard', 'blue-green', 'canary'], description: 'Deployment strategy to use')
+        string(name: 'CANARY_WEIGHT', defaultValue: '10', description: 'Initial canary traffic percentage (10, 25, 50, 100)')
+        choice(name: 'BLUE_GREEN_TARGET', choices: ['blue', 'green'], description: 'Target version for Blue-Green deployment')
     }
 
     environment {
@@ -11,6 +14,11 @@ pipeline {
         DOCKER_HUB_REPO = "ruthik005/ci-cd-app"
         DOCKER_TAG = "latest"
         BACKEND_URL = "${env.BACKEND_URL ?: 'http://localhost:3001'}"
+        // Deployment strategy tags
+        BLUE_TAG = "blue"
+        GREEN_TAG = "green"
+        STABLE_TAG = "stable"
+        CANARY_TAG = "canary"
     }
 
     stages {
@@ -140,9 +148,12 @@ pipeline {
         }
 
         stage('Kubernetes Deployment') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'standard' }
+            }
             steps {
                 script {
-                    echo "🚀 Deploying to Kubernetes..."
+                    echo "🚀 Standard Kubernetes Deployment..."
                     try {
                         withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
                             bat 'kubectl config current-context'
@@ -158,13 +169,272 @@ pipeline {
                                 kubectl rollout status deployment/ci-cd-app -n ci-cd-app --timeout=120s
                             '''
                             
-                            echo "✅ Kubernetes deployment successful!"
+                            echo "✅ Standard Kubernetes deployment successful!"
                             bat 'kubectl get services ci-cd-app-service -n ci-cd-app'
                             bat 'kubectl get pods -n ci-cd-app -l app=ci-cd-app'
                         }
                     } catch (Exception e) {
                         echo "⚠️ Kubernetes deployment skipped: ${e.getMessage()}"
                         echo "Build continues - K8s deployment is optional"
+                    }
+                }
+            }
+        }
+
+        // ================================================
+        // BLUE-GREEN DEPLOYMENT STRATEGY
+        // ================================================
+        stage('Blue-Green: Setup') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'blue-green' }
+            }
+            steps {
+                script {
+                    echo "🔵🟢 Blue-Green Deployment Strategy Selected"
+                    echo "Target version: ${params.BLUE_GREEN_TARGET}"
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            bat 'kubectl config current-context'
+                            bat 'kubectl cluster-info --request-timeout=10s'
+                            
+                            echo "Creating namespace..."
+                            bat 'kubectl create namespace ci-cd-app --dry-run=client -o yaml | kubectl apply -f -'
+                            
+                            echo "Applying Blue-Green infrastructure..."
+                            bat 'kubectl apply -f k8s/blue-green-deployment.yaml -n ci-cd-app'
+                        }
+                    } catch (Exception e) {
+                        echo "⚠️ Blue-Green setup failed: ${e.getMessage()}"
+                        error("Blue-Green deployment setup failed")
+                    }
+                }
+            }
+        }
+
+        stage('Blue-Green: Deploy New Version') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'blue-green' }
+            }
+            steps {
+                script {
+                    def targetVersion = params.BLUE_GREEN_TARGET
+                    def imageTag = targetVersion == 'blue' ? env.BLUE_TAG : env.GREEN_TAG
+                    
+                    echo "📦 Deploying to ${targetVersion} with image: ${DOCKER_HUB_REPO}:${imageTag}"
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            // Tag and push with version-specific tag
+                            bat "docker tag ${DOCKER_HUB_REPO}:${DOCKER_TAG} ${DOCKER_HUB_REPO}:${imageTag}"
+                            
+                            withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                                bat "docker login -u %DOCKER_USER% -p %DOCKER_PASS%"
+                                bat "docker push ${DOCKER_HUB_REPO}:${imageTag}"
+                            }
+                            
+                            // Update and scale deployment
+                            bat "kubectl set image deployment/ci-cd-app-${targetVersion} ci-cd-app=${DOCKER_HUB_REPO}:${imageTag} -n ci-cd-app"
+                            bat "kubectl scale deployment ci-cd-app-${targetVersion} -n ci-cd-app --replicas=2"
+                            bat "kubectl rollout status deployment/ci-cd-app-${targetVersion} -n ci-cd-app --timeout=120s"
+                            
+                            echo "✅ Deployed to ${targetVersion} successfully!"
+                        }
+                    } catch (Exception e) {
+                        echo "❌ Blue-Green deploy failed: ${e.getMessage()}"
+                        error("Blue-Green deployment failed")
+                    }
+                }
+            }
+        }
+
+        stage('Blue-Green: Health Check') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'blue-green' }
+            }
+            steps {
+                script {
+                    def targetVersion = params.BLUE_GREEN_TARGET
+                    echo "🏥 Running health checks on ${targetVersion}..."
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            // Check pod readiness
+                            def readyPods = bat(
+                                script: "kubectl get pods -n ci-cd-app -l app=ci-cd-app,version=${targetVersion} -o jsonpath='{.items[*].status.conditions[?(@.type==\"Ready\")].status}'",
+                                returnStdout: true
+                            ).trim()
+                            
+                            if (readyPods.contains('True')) {
+                                echo "✅ ${targetVersion} pods are healthy and ready"
+                            } else {
+                                error("Pods not ready - health check failed")
+                            }
+                        }
+                    } catch (Exception e) {
+                        echo "❌ Health check failed: ${e.getMessage()}"
+                        error("Health check failed for ${targetVersion}")
+                    }
+                }
+            }
+        }
+
+        stage('Blue-Green: Switch Traffic') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'blue-green' }
+            }
+            steps {
+                script {
+                    def targetVersion = params.BLUE_GREEN_TARGET
+                    def prevVersion = targetVersion == 'blue' ? 'green' : 'blue'
+                    
+                    echo "🔄 Switching traffic from ${prevVersion} to ${targetVersion}..."
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            // Switch service selector
+                            bat "kubectl patch service ci-cd-app-bluegreen -n ci-cd-app -p \"{\"spec\":{\"selector\":{\"version\":\"${targetVersion}\"}}}\""
+                            
+                            echo "✅ Traffic switched to ${targetVersion}!"
+                            
+                            // Scale down previous version
+                            echo "Scaling down ${prevVersion}..."
+                            bat "kubectl scale deployment ci-cd-app-${prevVersion} -n ci-cd-app --replicas=0"
+                            
+                            // Update ConfigMap
+                            bat "kubectl patch configmap deployment-status -n ci-cd-app -p \"{\"data\":{\"active-version\":\"${targetVersion}\"}}\""
+                            
+                            echo "🎉 Blue-Green deployment completed successfully!"
+                            bat 'kubectl get pods -n ci-cd-app -l app=ci-cd-app'
+                        }
+                    } catch (Exception e) {
+                        echo "❌ Traffic switch failed: ${e.getMessage()}"
+                        error("Failed to switch traffic")
+                    }
+                }
+            }
+        }
+
+        // ================================================
+        // CANARY DEPLOYMENT STRATEGY
+        // ================================================
+        stage('Canary: Setup') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'canary' }
+            }
+            steps {
+                script {
+                    echo "🐤 Canary Deployment Strategy Selected"
+                    echo "Initial canary weight: ${params.CANARY_WEIGHT}%"
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            bat 'kubectl config current-context'
+                            bat 'kubectl cluster-info --request-timeout=10s'
+                            
+                            echo "Creating namespace..."
+                            bat 'kubectl create namespace ci-cd-app --dry-run=client -o yaml | kubectl apply -f -'
+                            
+                            echo "Applying Canary infrastructure..."
+                            bat 'kubectl apply -f k8s/canary-deployment.yaml -n ci-cd-app'
+                            bat 'kubectl apply -f k8s/ingress-traffic-split.yaml -n ci-cd-app'
+                        }
+                    } catch (Exception e) {
+                        echo "⚠️ Canary setup failed: ${e.getMessage()}"
+                        error("Canary deployment setup failed")
+                    }
+                }
+            }
+        }
+
+        stage('Canary: Deploy New Version') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'canary' }
+            }
+            steps {
+                script {
+                    echo "📦 Deploying canary version with image: ${DOCKER_HUB_REPO}:${CANARY_TAG}"
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            // Tag and push canary image
+                            bat "docker tag ${DOCKER_HUB_REPO}:${DOCKER_TAG} ${DOCKER_HUB_REPO}:${CANARY_TAG}"
+                            
+                            withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                                bat "docker login -u %DOCKER_USER% -p %DOCKER_PASS%"
+                                bat "docker push ${DOCKER_HUB_REPO}:${CANARY_TAG}"
+                            }
+                            
+                            // Update canary deployment
+                            bat "kubectl set image deployment/ci-cd-app-canary ci-cd-app=${DOCKER_HUB_REPO}:${CANARY_TAG} -n ci-cd-app"
+                            bat 'kubectl scale deployment ci-cd-app-canary -n ci-cd-app --replicas=1'
+                            bat 'kubectl rollout status deployment/ci-cd-app-canary -n ci-cd-app --timeout=120s'
+                            
+                            echo "✅ Canary version deployed successfully!"
+                        }
+                    } catch (Exception e) {
+                        echo "❌ Canary deploy failed: ${e.getMessage()}"
+                        error("Canary deployment failed")
+                    }
+                }
+            }
+        }
+
+        stage('Canary: Set Traffic Weight') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'canary' }
+            }
+            steps {
+                script {
+                    def canaryWeight = params.CANARY_WEIGHT
+                    echo "⚖️ Setting canary traffic weight to ${canaryWeight}%..."
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            bat "kubectl annotate ingress ci-cd-app-canary -n ci-cd-app nginx.ingress.kubernetes.io/canary-weight=${canaryWeight} --overwrite"
+                            
+                            // Update ConfigMap
+                            bat "kubectl patch configmap canary-status -n ci-cd-app -p \"{\"data\":{\"canary-weight\":\"${canaryWeight}\",\"canary-enabled\":\"true\"}}\""
+                            
+                            echo "✅ Canary weight set to ${canaryWeight}%"
+                            echo "   Stable: ${100 - canaryWeight.toInteger()}% | Canary: ${canaryWeight}%"
+                        }
+                    } catch (Exception e) {
+                        echo "❌ Failed to set canary weight: ${e.getMessage()}"
+                        error("Failed to configure canary traffic")
+                    }
+                }
+            }
+        }
+
+        stage('Canary: Health Monitoring') {
+            when {
+                expression { return params.DEPLOY_STRATEGY == 'canary' }
+            }
+            steps {
+                script {
+                    echo "🏥 Monitoring canary health for 30 seconds..."
+                    
+                    try {
+                        withKubeConfig([credentialsId: 'kubeconfig-minikube']) {
+                            // Wait and check health
+                            bat 'ping -n 35 127.0.0.1 > nul'
+                            
+                            def canaryReady = bat(
+                                script: 'kubectl get pods -n ci-cd-app -l app=ci-cd-app,version=canary -o jsonpath="{.items[*].status.conditions[?(@.type==\"Ready\")].status}"',
+                                returnStdout: true
+                            ).trim()
+                            
+                            if (canaryReady.contains('True')) {
+                                echo "✅ Canary is healthy!"
+                                echo "🐤 Canary deployment completed successfully!"
+                                echo "   To promote: Increase canary weight or swap stable with canary"
+                                bat 'kubectl get pods -n ci-cd-app -l app=ci-cd-app'
+                            } else {
+                                echo "⚠️ Canary health check failed - consider rollback"
+                            }
+                        }
+                    } catch (Exception e) {
+                        echo "⚠️ Canary monitoring warning: ${e.getMessage()}"
                     }
                 }
             }

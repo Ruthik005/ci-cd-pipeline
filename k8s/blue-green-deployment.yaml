@@ -1,0 +1,178 @@
+---
+# Blue-Green Deployment Configuration for CI/CD App
+# This creates two identical environments (blue & green) for zero-downtime deployments
+
+# ============================================
+# BLUE DEPLOYMENT (Production - Initially Active)
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ci-cd-app-blue
+  namespace: ci-cd-app
+  labels:
+    app: ci-cd-app
+    version: blue
+    deployment-strategy: blue-green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ci-cd-app
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: ci-cd-app
+        version: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: ci-cd-app
+        image: ruthik005/ci-cd-app:blue
+        ports:
+        - containerPort: 3000
+          name: http
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: APP_VERSION
+          value: "blue"
+        - name: DEPLOYMENT_STRATEGY
+          value: "blue-green"
+
+---
+# ============================================
+# GREEN DEPLOYMENT (Staging - Initially Inactive)
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ci-cd-app-green
+  namespace: ci-cd-app
+  labels:
+    app: ci-cd-app
+    version: green
+    deployment-strategy: blue-green
+spec:
+  replicas: 0  # Initially scaled to 0
+  selector:
+    matchLabels:
+      app: ci-cd-app
+      version: green
+  template:
+    metadata:
+      labels:
+        app: ci-cd-app
+        version: green
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: ci-cd-app
+        image: ruthik005/ci-cd-app:green
+        ports:
+        - containerPort: 3000
+          name: http
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: APP_VERSION
+          value: "green"
+        - name: DEPLOYMENT_STRATEGY
+          value: "blue-green"
+
+---
+# ============================================
+# BLUE-GREEN SERVICE (Routes to active version)
+# ============================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ci-cd-app-bluegreen
+  namespace: ci-cd-app
+  labels:
+    app: ci-cd-app
+    deployment-strategy: blue-green
+spec:
+  type: ClusterIP
+  selector:
+    app: ci-cd-app
+    version: blue  # Change this to 'green' to switch traffic
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+      name: http
+
+---
+# ============================================
+# CONFIGMAP - Track Active Deployment
+# ============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deployment-status
+  namespace: ci-cd-app
+data:
+  active-version: "blue"
+  deployment-strategy: "blue-green"
+  last-switch-time: ""
+  switch-count: "0"
