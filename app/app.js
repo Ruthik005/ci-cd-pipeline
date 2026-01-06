@@ -93,17 +93,97 @@ app.get('/metrics', async (req, res) => {
 // APPLICATION ROUTES
 // ============================================
 
+// Get deployment info from environment
+const APP_VERSION = process.env.APP_VERSION || 'standard';
+const DEPLOYMENT_STRATEGY = process.env.DEPLOYMENT_STRATEGY || 'standard';
+
 app.get('/', (req, res) => {
-  res.send('🚀 CI/CD App is Running! (v2.0 - with DevSecOps & Observability)');
+  const versionColor = APP_VERSION === 'blue' ? '#3b82f6' :
+    APP_VERSION === 'green' ? '#10b981' :
+      APP_VERSION === 'canary' ? '#f59e0b' : '#6366f1';
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>CI/CD App - ${APP_VERSION.toUpperCase()}</title>
+      <style>
+        body {
+          font-family: 'Segoe UI', sans-serif;
+          background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+          color: white;
+          min-height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin: 0;
+        }
+        .container {
+          text-align: center;
+          padding: 40px;
+          background: rgba(255,255,255,0.1);
+          border-radius: 20px;
+          border: 2px solid ${versionColor};
+          box-shadow: 0 0 30px ${versionColor}40;
+        }
+        .version-badge {
+          background: ${versionColor};
+          padding: 10px 30px;
+          border-radius: 30px;
+          font-size: 24px;
+          font-weight: bold;
+          display: inline-block;
+          margin-bottom: 20px;
+          text-transform: uppercase;
+          animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+          0%, 100% { box-shadow: 0 0 10px ${versionColor}; }
+          50% { box-shadow: 0 0 30px ${versionColor}; }
+        }
+        h1 { font-size: 32px; margin: 20px 0; }
+        .strategy { color: #94a3b8; font-size: 18px; }
+        .features { margin-top: 30px; color: #cbd5e1; }
+        .feature { 
+          display: inline-block; 
+          background: rgba(255,255,255,0.1); 
+          padding: 8px 16px; 
+          margin: 5px;
+          border-radius: 8px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="version-badge">🚀 ${APP_VERSION} VERSION</div>
+        <h1>CI/CD Application</h1>
+        <p class="strategy">Deployment Strategy: <strong>${DEPLOYMENT_STRATEGY}</strong></p>
+        <div class="features">
+          <span class="feature">✅ DevSecOps</span>
+          <span class="feature">📊 Observability</span>
+          <span class="feature">🔥 Chaos Engineering</span>
+          <span class="feature">🔵🟢 Blue-Green</span>
+          <span class="feature">🐤 Canary</span>
+        </div>
+        <p style="margin-top: 30px; color: #64748b;">
+          Version: 2.0.0 | Uptime: ${Math.floor(process.uptime())}s
+        </p>
+      </div>
+    </body>
+    </html>
+  `);
 });
 
-// Example API endpoint
+// Example API endpoint - Shows deployment version
 app.get('/api/status', (req, res) => {
   res.json({
     app: 'ci-cd-app',
     version: '2.0.0',
-    features: ['DevSecOps', 'Observability', 'Chaos Engineering'],
-    uptime: process.uptime()
+    deploymentVersion: APP_VERSION,
+    deploymentStrategy: DEPLOYMENT_STRATEGY,
+    features: ['DevSecOps', 'Observability', 'Chaos Engineering', 'Blue-Green Deployment', 'Canary Deployment'],
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
   });
 });
 
