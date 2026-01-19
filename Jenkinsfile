@@ -13,12 +13,15 @@ pipeline {
         IMAGE_NAME = "ci-cd-app"
         DOCKER_HUB_REPO = "ruthik005/ci-cd-app"
         DOCKER_TAG = "latest"
-        BACKEND_URL = "${env.BACKEND_URL ?: 'http://localhost:3001'}"
+        BACKEND_URL = "${env.BACKEND_URL ?: 'http://localhost:4000'}"
         // Deployment strategy tags
         BLUE_TAG = "blue"
         GREEN_TAG = "green"
         STABLE_TAG = "stable"
         CANARY_TAG = "canary"
+        // TaskFlow Pro Images (same repo, different containers)
+        TASKFLOW_FRONTEND = "ruthik005/taskflow-frontend"
+        TASKFLOW_API = "ruthik005/taskflow-api"
     }
 
     stages {
@@ -143,6 +146,77 @@ pipeline {
                             echo "Docker image pushed successfully!"
                         '''
                     }
+                }
+            }
+        }
+
+        // ================================================
+        // TASKFLOW PRO - BUILD & DEPLOY (SAME PIPELINE)
+        // Industry Standard: One pipeline for all services
+        // ================================================
+        stage('TaskFlow Pro: Build Frontend') {
+            steps {
+                dir('frontend') {
+                    script {
+                        def versionTag = params.DEPLOY_STRATEGY == 'blue-green' ? params.BLUE_GREEN_TARGET : 
+                                        params.DEPLOY_STRATEGY == 'canary' ? env.CANARY_TAG : env.STABLE_TAG
+                        
+                        echo "📦 Building TaskFlow Pro Frontend (${versionTag})..."
+                        
+                        bat """
+                            npm ci
+                            npm run build
+                            docker build -t %TASKFLOW_FRONTEND%:${versionTag} ^
+                                --build-arg VITE_APP_VERSION=${versionTag} ^
+                                --build-arg VITE_DEPLOYMENT_STRATEGY=${params.DEPLOY_STRATEGY} .
+                            docker tag %TASKFLOW_FRONTEND%:${versionTag} %TASKFLOW_FRONTEND%:%DOCKER_TAG%
+                        """
+                        
+                        echo "✅ TaskFlow Frontend built: ${versionTag}"
+                    }
+                }
+            }
+        }
+
+        stage('TaskFlow Pro: Build API') {
+            steps {
+                dir('app') {
+                    script {
+                        def versionTag = params.DEPLOY_STRATEGY == 'blue-green' ? params.BLUE_GREEN_TARGET : 
+                                        params.DEPLOY_STRATEGY == 'canary' ? env.CANARY_TAG : env.STABLE_TAG
+                        
+                        echo "📦 Building TaskFlow Pro API (${versionTag})..."
+                        
+                        bat """
+                            docker build -t %TASKFLOW_API%:${versionTag} ^
+                                --build-arg APP_VERSION=${versionTag} ^
+                                --build-arg DEPLOYMENT_STRATEGY=${params.DEPLOY_STRATEGY} .
+                            docker tag %TASKFLOW_API%:${versionTag} %TASKFLOW_API%:%DOCKER_TAG%
+                        """
+                        
+                        echo "✅ TaskFlow API built: ${versionTag}"
+                    }
+                }
+            }
+        }
+
+        stage('TaskFlow Pro: Push Images') {
+            steps {
+                script {
+                    def versionTag = params.DEPLOY_STRATEGY == 'blue-green' ? params.BLUE_GREEN_TARGET : 
+                                    params.DEPLOY_STRATEGY == 'canary' ? env.CANARY_TAG : env.STABLE_TAG
+                    
+                    withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                        bat """
+                            docker login -u %DOCKER_USER% -p %DOCKER_PASS%
+                            docker push %TASKFLOW_FRONTEND%:${versionTag}
+                            docker push %TASKFLOW_FRONTEND%:%DOCKER_TAG%
+                            docker push %TASKFLOW_API%:${versionTag}
+                            docker push %TASKFLOW_API%:%DOCKER_TAG%
+                        """
+                    }
+                    
+                    echo "✅ TaskFlow Pro images pushed to Docker Hub"
                 }
             }
         }
@@ -541,6 +615,36 @@ pipeline {
                         echo "Build status sent successfully to backend."
                     } catch (Exception e) {
                         echo "Failed to send build status to backend: ${e.getMessage()}"
+                    }
+                    
+                    // ================================================
+                    // TASKFLOW PRO - Send deployment status to dashboard
+                    // This displays TaskFlow deployment in CI/CD Dashboard
+                    // ================================================
+                    try {
+                        def taskflowVersion = params.DEPLOY_STRATEGY == 'blue-green' ? params.BLUE_GREEN_TARGET : 
+                                             params.DEPLOY_STRATEGY == 'canary' ? 'canary' : 'stable'
+                        
+                        def taskflowData = [
+                            project: 'TaskFlow Pro',
+                            status: buildStatus,
+                            buildNumber: buildNumber,
+                            strategy: params.DEPLOY_STRATEGY,
+                            activeVersion: taskflowVersion,
+                            previousVersion: taskflowVersion == 'blue' ? 'green' : 'blue',
+                            frontendImage: "${env.TASKFLOW_FRONTEND}:${taskflowVersion}",
+                            apiImage: "${env.TASKFLOW_API}:${taskflowVersion}",
+                            kubernetesDeployed: buildStatus in ['SUCCESS', 'UNSTABLE'],
+                            consoleLink: consoleLink,
+                            timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                        ]
+                        
+                        def taskflowJson = groovy.json.JsonOutput.toJson(taskflowData)
+                        def escapedTaskflowJson = taskflowJson.replace('"', '\\"').replace("'", "''")
+                        bat """powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-RestMethod -Uri '%BACKEND_URL%/api/taskflow-deployment' -Method POST -ContentType 'application/json' -Headers @{'Authorization'='Bearer %JENKINS_API_TOKEN%'} -Body '${escapedTaskflowJson}' -TimeoutSec 30; Write-Host 'TaskFlow status sent' } catch { Write-Host 'TaskFlow send failed' }" """
+                        echo "TaskFlow Pro deployment status sent to dashboard."
+                    } catch (Exception e) {
+                        echo "Failed to send TaskFlow status: ${e.getMessage()}"
                     }
                 }
             }

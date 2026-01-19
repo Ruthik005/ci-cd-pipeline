@@ -1,0 +1,185 @@
+# TaskFlow Pro - CI/CD Pipeline Demo Application
+# Docker Compose for local development and testing
+
+version: '3.8'
+
+services:
+  # ==========================================
+  # FRONTEND SERVICE (React/Vite)
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_APP_VERSION: ${APP_VERSION:-stable}
+        VITE_DEPLOYMENT_STRATEGY: ${DEPLOYMENT_STRATEGY:-standard}
+    ports:
+      - "3000:80"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - taskflow-network
+    labels:
+      - "app.version=${APP_VERSION:-stable}"
+      - "app.strategy=${DEPLOYMENT_STRATEGY:-standard}"
+
+  # ==========================================
+  # BACKEND API SERVICE (Node.js/Express)
+  # ==========================================
+  backend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "4000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - APP_VERSION=${APP_VERSION:-stable}
+      - DEPLOYMENT_STRATEGY=${DEPLOYMENT_STRATEGY:-standard}
+      - MONGO_URI=mongodb://mongodb:27017/taskflow
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - taskflow-network
+    labels:
+      - "app.version=${APP_VERSION:-stable}"
+      - "app.strategy=${DEPLOYMENT_STRATEGY:-standard}"
+
+  # ==========================================
+  # MONGODB DATABASE
+  # ==========================================
+  mongodb:
+    image: mongo:7-jammy
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - taskflow-network
+
+  # ==========================================
+  # BLUE VERSION (for Blue-Green deployment demo)
+  # ==========================================
+  frontend-blue:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_APP_VERSION: blue
+        VITE_DEPLOYMENT_STRATEGY: blue-green
+    ports:
+      - "3001:80"
+    networks:
+      - taskflow-network
+    profiles:
+      - blue-green
+    labels:
+      - "app.version=blue"
+      - "app.strategy=blue-green"
+
+  backend-blue:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "4001:3000"
+    environment:
+      - APP_VERSION=blue
+      - DEPLOYMENT_STRATEGY=blue-green
+      - PORT=3000
+    networks:
+      - taskflow-network
+    profiles:
+      - blue-green
+    labels:
+      - "app.version=blue"
+      - "app.strategy=blue-green"
+
+  # ==========================================
+  # GREEN VERSION (for Blue-Green deployment demo)
+  # ==========================================
+  frontend-green:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_APP_VERSION: green
+        VITE_DEPLOYMENT_STRATEGY: blue-green
+    ports:
+      - "3002:80"
+    networks:
+      - taskflow-network
+    profiles:
+      - blue-green
+    labels:
+      - "app.version=green"
+      - "app.strategy=blue-green"
+
+  backend-green:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "4002:3000"
+    environment:
+      - APP_VERSION=green
+      - DEPLOYMENT_STRATEGY=blue-green
+      - PORT=3000
+    networks:
+      - taskflow-network
+    profiles:
+      - blue-green
+    labels:
+      - "app.version=green"
+      - "app.strategy=blue-green"
+
+  # ==========================================
+  # CANARY VERSION (for Canary deployment demo)
+  # ==========================================
+  frontend-canary:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_APP_VERSION: canary
+        VITE_DEPLOYMENT_STRATEGY: canary
+    ports:
+      - "3003:80"
+    networks:
+      - taskflow-network
+    profiles:
+      - canary
+    labels:
+      - "app.version=canary"
+      - "app.strategy=canary"
+
+volumes:
+  mongodb_data:
+    driver: local
+
+networks:
+  taskflow-network:
+    driver: bridge

@@ -1,0 +1,488 @@
+# TaskFlow Pro - Kubernetes Deployment Manifests
+# This file contains all resources needed to deploy TaskFlow Pro
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: taskflow-pro
+  labels:
+    app: taskflow-pro
+    environment: production
+
+---
+# ConfigMap for deployment configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskflow-config
+  namespace: taskflow-pro
+data:
+  APP_VERSION: "stable"
+  DEPLOYMENT_STRATEGY: "standard"
+  NODE_ENV: "production"
+  
+---
+# =================================================
+# FRONTEND DEPLOYMENT - BLUE/GREEN READY
+# =================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-frontend-stable
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-frontend
+    version: stable
+    strategy: blue-green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: taskflow-frontend
+      version: stable
+  template:
+    metadata:
+      labels:
+        app: taskflow-frontend
+        version: stable
+    spec:
+      containers:
+      - name: frontend
+        image: ruthik005/taskflow-frontend:stable
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+---
+# Frontend Blue Version (for Blue-Green deployment)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-frontend-blue
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-frontend
+    version: blue
+    strategy: blue-green
+spec:
+  replicas: 0  # Scale up when switching to blue
+  selector:
+    matchLabels:
+      app: taskflow-frontend
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: taskflow-frontend
+        version: blue
+    spec:
+      containers:
+      - name: frontend
+        image: ruthik005/taskflow-frontend:blue
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+
+---
+# Frontend Green Version (for Blue-Green deployment)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-frontend-green
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-frontend
+    version: green
+    strategy: blue-green
+spec:
+  replicas: 0  # Scale up when switching to green
+  selector:
+    matchLabels:
+      app: taskflow-frontend
+      version: green
+  template:
+    metadata:
+      labels:
+        app: taskflow-frontend
+        version: green
+    spec:
+      containers:
+      - name: frontend
+        image: ruthik005/taskflow-frontend:green
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+
+---
+# Frontend Canary Version
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-frontend-canary
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-frontend
+    version: canary
+    strategy: canary
+spec:
+  replicas: 0  # Scale up for canary testing
+  selector:
+    matchLabels:
+      app: taskflow-frontend
+      version: canary
+  template:
+    metadata:
+      labels:
+        app: taskflow-frontend
+        version: canary
+    spec:
+      containers:
+      - name: frontend
+        image: ruthik005/taskflow-frontend:canary
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+
+---
+# =================================================
+# API DEPLOYMENT - BLUE/GREEN READY
+# =================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-api-stable
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-api
+    version: stable
+    strategy: blue-green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: taskflow-api
+      version: stable
+  template:
+    metadata:
+      labels:
+        app: taskflow-api
+        version: stable
+    spec:
+      containers:
+      - name: api
+        image: ruthik005/taskflow-api:stable
+        ports:
+        - containerPort: 3000
+        env:
+        - name: APP_VERSION
+          valueFrom:
+            configMapKeyRef:
+              name: taskflow-config
+              key: APP_VERSION
+        - name: DEPLOYMENT_STRATEGY
+          valueFrom:
+            configMapKeyRef:
+              name: taskflow-config
+              key: DEPLOYMENT_STRATEGY
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+---
+# API Blue Version
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-api-blue
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-api
+    version: blue
+    strategy: blue-green
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: taskflow-api
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: taskflow-api
+        version: blue
+    spec:
+      containers:
+      - name: api
+        image: ruthik005/taskflow-api:blue
+        ports:
+        - containerPort: 3000
+        env:
+        - name: APP_VERSION
+          value: "blue"
+        - name: DEPLOYMENT_STRATEGY
+          value: "blue-green"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+
+---
+# API Green Version
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-api-green
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-api
+    version: green
+    strategy: blue-green
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: taskflow-api
+      version: green
+  template:
+    metadata:
+      labels:
+        app: taskflow-api
+        version: green
+    spec:
+      containers:
+      - name: api
+        image: ruthik005/taskflow-api:green
+        ports:
+        - containerPort: 3000
+        env:
+        - name: APP_VERSION
+          value: "green"
+        - name: DEPLOYMENT_STRATEGY
+          value: "blue-green"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+
+---
+# =================================================
+# SERVICES
+# =================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-frontend
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: taskflow-frontend
+    version: stable  # Switch this to blue/green for deployment
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-frontend-canary
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-frontend
+    version: canary
+spec:
+  type: ClusterIP
+  selector:
+    app: taskflow-frontend
+    version: canary
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-api
+  namespace: taskflow-pro
+  labels:
+    app: taskflow-api
+spec:
+  type: ClusterIP
+  selector:
+    app: taskflow-api
+    version: stable  # Switch this to blue/green for deployment
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+
+---
+# =================================================
+# INGRESS WITH TRAFFIC SPLITTING
+# =================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: taskflow-ingress
+  namespace: taskflow-pro
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: taskflow.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: taskflow-frontend
+            port:
+              number: 80
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: taskflow-api
+            port:
+              number: 3000
+
+---
+# Canary Ingress (10% traffic)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: taskflow-ingress-canary
+  namespace: taskflow-pro
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "10"
+spec:
+  rules:
+  - host: taskflow.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: taskflow-frontend-canary
+            port:
+              number: 80
+
+---
+# =================================================
+# HORIZONTAL POD AUTOSCALER
+# =================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: taskflow-frontend-hpa
+  namespace: taskflow-pro
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: taskflow-frontend-stable
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: taskflow-api-hpa
+  namespace: taskflow-pro
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: taskflow-api-stable
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
