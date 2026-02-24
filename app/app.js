@@ -1,6 +1,12 @@
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
 const promClient = require('prom-client');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'taskflow-super-secret-key-2024';
+const JWT_EXPIRES_IN = '7d';
 
 const app = express();
 
@@ -53,31 +59,142 @@ const APP_VERSION = process.env.APP_VERSION || 'standard';
 const DEPLOYMENT_STRATEGY = process.env.DEPLOYMENT_STRATEGY || 'standard';
 
 // ============================================
-// IN-MEMORY DATABASE (MongoDB would replace this)
+// MONGODB CONNECTION & SCHEMAS
 // ============================================
 
-let users = [
-  { id: '1', email: 'admin@taskflow.com', name: 'Admin User', role: 'admin', createdAt: new Date().toISOString() }
-];
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://admin:taskflow123@localhost:27017/taskflow?authSource=admin';
+console.log('🔗 Attempting to connect to MongoDB with credentials...');
 
-let projects = [
-  { id: '1', name: 'TaskFlow Pro Development', description: 'Building the next-gen project management platform', ownerId: '1', members: ['1'], createdAt: new Date().toISOString() },
-  { id: '2', name: 'CI/CD Pipeline Setup', description: 'Setting up continuous integration and deployment', ownerId: '1', members: ['1'], createdAt: new Date().toISOString() }
-];
+// User Schema
+const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  password: { type: String },
+  role: { type: String, default: 'member' },
+  avatar: { type: String },
+  timezone: { type: String, default: 'UTC+5:30' },
+  notifications: { type: Boolean, default: true },
+  theme: { type: String, default: 'sunset' }
+}, { timestamps: true });
 
-let tasks = [
-  { id: '1', projectId: '1', title: 'Design new landing page', description: 'Create a modern, responsive landing page', status: 'todo', priority: 'high', tag: 'feature', assigneeId: '1', createdAt: new Date().toISOString() },
-  { id: '2', projectId: '1', title: 'Fix login validation bug', description: 'Email validation not working correctly', status: 'todo', priority: 'urgent', tag: 'bug', assigneeId: '1', createdAt: new Date().toISOString() },
-  { id: '3', projectId: '1', title: 'Add dark mode support', description: 'Implement theme switching functionality', status: 'todo', priority: 'medium', tag: 'enhancement', assigneeId: null, createdAt: new Date().toISOString() },
-  { id: '4', projectId: '1', title: 'Implement user authentication', description: 'JWT-based auth system', status: 'inProgress', priority: 'high', tag: 'feature', assigneeId: '1', createdAt: new Date().toISOString() },
-  { id: '5', projectId: '2', title: 'Set up CI/CD pipeline', description: 'Configure Jenkins and Kubernetes', status: 'inProgress', priority: 'high', tag: 'enhancement', assigneeId: '1', createdAt: new Date().toISOString() },
-  { id: '6', projectId: '1', title: 'API rate limiting', description: 'Implement rate limiting middleware', status: 'review', priority: 'medium', tag: 'feature', assigneeId: '1', createdAt: new Date().toISOString() },
-  { id: '7', projectId: '1', title: 'Database schema design', description: 'Design MongoDB schemas', status: 'done', priority: 'high', tag: 'feature', assigneeId: '1', createdAt: new Date().toISOString() },
-  { id: '8', projectId: '2', title: 'Project setup', description: 'Initial repository and project structure', status: 'done', priority: 'low', tag: 'enhancement', assigneeId: '1', createdAt: new Date().toISOString() }
-];
+// Project Schema
+const projectSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: { type: String, default: '' },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  color: { type: String, default: '#f97316' },
+  status: { type: String, default: 'active' }
+}, { timestamps: true });
 
-let idCounter = 100;
-const generateId = () => String(++idCounter);
+// Task Schema
+const taskSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true },
+  title: { type: String, required: true },
+  description: { type: String, default: '' },
+  status: { type: String, enum: ['todo', 'inProgress', 'review', 'done'], default: 'todo' },
+  priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'medium' },
+  tag: { type: String, enum: ['feature', 'bug', 'enhancement', 'documentation'], default: 'feature' },
+  assignee: { type: String },
+  dueDate: { type: Date }
+}, { timestamps: true });
+
+// Activity Schema for tracking recent actions
+const activitySchema = new mongoose.Schema({
+  type: { type: String, required: true }, // 'task_created', 'task_moved', 'project_created', etc.
+  description: { type: String, required: true },
+  icon: { type: String, default: '📝' },
+  color: { type: String, default: '#f97316' },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+  taskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task' }
+}, { timestamps: true });
+
+// Comment Schema for task discussions
+const commentSchema = new mongoose.Schema({
+  taskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task', required: true },
+  author: { type: String, required: true },
+  content: { type: String, required: true },
+  avatar: { type: String },
+}, { timestamps: true });
+
+const User = mongoose.model('User', userSchema);
+const Project = mongoose.model('Project', projectSchema);
+const Task = mongoose.model('Task', taskSchema);
+const Activity = mongoose.model('Activity', activitySchema);
+const Comment = mongoose.model('Comment', commentSchema);
+
+// MongoDB Connection with retry logic
+let isDbConnected = false;
+
+async function connectDB() {
+  try {
+    await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    isDbConnected = true;
+    console.log('✅ Connected to MongoDB');
+
+    // Seed initial data if empty
+    await seedDatabase();
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error.message);
+    console.log('⏳ Will retry in 5 seconds...');
+    setTimeout(connectDB, 5000);
+  }
+}
+
+async function seedDatabase() {
+  try {
+    const userCount = await User.countDocuments();
+    if (userCount === 0) {
+      console.log('📦 Seeding initial data...');
+
+      // Create demo user
+      const user = await User.create({
+        email: 'demo@taskflow.pro',
+        name: 'Demo User',
+        role: 'admin'
+      });
+
+      // Create sample projects
+      const projects = await Project.create([
+        { name: 'TaskFlow Pro', description: 'Project management platform demonstrating deployment strategies', ownerId: user._id, members: [user._id], color: '#f97316' },
+        { name: 'CI/CD Pipeline', description: 'Automated deployment and testing infrastructure', ownerId: user._id, members: [user._id], color: '#14b8a6' },
+        { name: 'Analytics Dashboard', description: 'Real-time metrics and insights platform', ownerId: user._id, members: [user._id], color: '#a855f7' }
+      ]);
+
+      // Create sample tasks
+      await Task.create([
+        { projectId: projects[0]._id, title: 'Design system documentation', description: 'Create comprehensive design system docs', status: 'todo', priority: 'high', tag: 'feature', assignee: 'Sarah' },
+        { projectId: projects[0]._id, title: 'Fix authentication token refresh', description: 'Token expires too quickly', status: 'todo', priority: 'urgent', tag: 'bug', assignee: 'Mike' },
+        { projectId: projects[0]._id, title: 'Add export to PDF feature', description: 'Allow users to export reports', status: 'todo', priority: 'medium', tag: 'enhancement' },
+        { projectId: projects[0]._id, title: 'Implement WebSocket connections', description: 'Real-time updates for collaboration', status: 'inProgress', priority: 'high', tag: 'feature', assignee: 'Alex' },
+        { projectId: projects[0]._id, title: 'Database query optimization', description: 'Improve dashboard load times', status: 'inProgress', priority: 'high', tag: 'enhancement', assignee: 'Jordan' },
+        { projectId: projects[0]._id, title: 'User permissions refactor', description: 'Role-based access control', status: 'review', priority: 'medium', tag: 'feature', assignee: 'Sarah' },
+        { projectId: projects[1]._id, title: 'Set up CI/CD pipeline', description: 'Jenkins + Kubernetes deployment', status: 'done', priority: 'high', tag: 'enhancement', assignee: 'DevOps' },
+        { projectId: projects[1]._id, title: 'Implement Blue-Green deployment', description: 'Zero-downtime releases', status: 'done', priority: 'high', tag: 'feature', assignee: 'DevOps' },
+        { projectId: projects[2]._id, title: 'Add Prometheus metrics', description: 'Observability setup complete', status: 'done', priority: 'medium', tag: 'enhancement', assignee: 'Alex' }
+      ]);
+
+      // Create recent activity
+      await Activity.create([
+        { type: 'build_complete', description: 'Pipeline build #47 completed', icon: '✅', color: '#4ade80' },
+        { type: 'deployment', description: 'Deployed to staging environment', icon: '🔄', color: '#14b8a6' },
+        { type: 'task_update', description: "Task 'Database optimization' updated", icon: '📝', color: '#f97316' },
+        { type: 'member_joined', description: 'Sarah joined the project', icon: '👤', color: '#a855f7' }
+      ]);
+
+      console.log('✅ Database seeded successfully!');
+    }
+  } catch (error) {
+    console.error('Error seeding database:', error);
+  }
+}
+
+// Start DB connection
+connectDB();
 
 // ============================================
 // HEALTH & READINESS ENDPOINTS
@@ -87,11 +204,15 @@ app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
     version: APP_VERSION,
+    database: isDbConnected ? 'connected' : 'disconnected',
     timestamp: new Date().toISOString()
   });
 });
 
 app.get('/ready', (req, res) => {
+  if (!isDbConnected) {
+    return res.status(503).json({ status: 'not ready', reason: 'database not connected' });
+  }
   res.status(200).json({
     status: 'ready',
     version: APP_VERSION,
@@ -112,20 +233,27 @@ app.get('/metrics', async (req, res) => {
 // VERSION / STATUS ENDPOINT
 // ============================================
 
-app.get('/api/status', (req, res) => {
-  res.json({
-    app: 'TaskFlow Pro API',
-    version: '1.0.0',
-    deploymentVersion: APP_VERSION,
-    deploymentStrategy: DEPLOYMENT_STRATEGY,
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    stats: {
-      users: users.length,
-      projects: projects.length,
-      tasks: tasks.length
-    }
-  });
+app.get('/api/status', async (req, res) => {
+  try {
+    const [users, projects, tasks] = await Promise.all([
+      User.countDocuments(),
+      Project.countDocuments(),
+      Task.countDocuments()
+    ]);
+
+    res.json({
+      app: 'TaskFlow Pro API',
+      version: '1.0.0',
+      deploymentVersion: APP_VERSION,
+      deploymentStrategy: DEPLOYMENT_STRATEGY,
+      database: isDbConnected ? 'connected' : 'disconnected',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      stats: { users, projects, tasks }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/version', (req, res) => {
@@ -145,228 +273,469 @@ app.get('/api/version', (req, res) => {
 });
 
 // ============================================
-// AUTH ENDPOINTS (Simplified - no real auth)
+// AUTH ENDPOINTS
 // ============================================
 
-app.post('/api/auth/register', (req, res) => {
-  const { email, name, password } = req.body;
+// JWT authentication middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
 
-  if (!email || !name || !password) {
-    return res.status(400).json({ error: 'Email, name, and password are required' });
+  if (!token) {
+    // Allow unauthenticated access but set req.user to null
+    req.user = null;
+    return next();
   }
 
-  if (users.find(u => u.email === email)) {
-    return res.status(409).json({ error: 'User already exists' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    req.user = null;
+    next();
   }
+};
 
-  const newUser = {
-    id: generateId(),
-    email,
-    name,
-    role: 'member',
-    createdAt: new Date().toISOString()
-  };
+// Apply auth middleware globally
+app.use(authenticateToken);
 
-  users.push(newUser);
-  res.status(201).json({ user: newUser, token: 'mock-jwt-token-' + newUser.id });
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, name, password } = req.body;
+
+    if (!email || !name) {
+      return res.status(400).json({ error: 'Email and name are required' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({ error: 'User already exists' });
+    }
+
+    // Hash password with bcrypt
+    const hashedPassword = password ? await bcrypt.hash(password, 12) : undefined;
+
+    const user = await User.create({ email, name, password: hashedPassword, role: 'member' });
+    const token = jwt.sign({ id: user._id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+
+    const userObj = user.toObject();
+    delete userObj.password;
+    res.status(201).json({ user: userObj, token });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Verify password with bcrypt (skip for demo users without passwords)
+    if (user.password && password) {
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      if (!isValidPassword) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+    }
+
+    const token = jwt.sign({ id: user._id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+
+    const userObj = user.toObject();
+    delete userObj.password;
+    res.json({ user: userObj, token });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const user = users.find(u => u.email === email);
-
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  res.json({ user, token: 'mock-jwt-token-' + user.id });
 });
 
 // ============================================
 // USER ENDPOINTS
 // ============================================
 
-app.get('/api/users', (req, res) => {
-  res.json(users);
+app.get('/api/users', async (req, res) => {
+  try {
+    const users = await User.find().select('-password');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.get('/api/users/:id', (req, res) => {
-  const user = users.find(u => u.id === req.params.id);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json(user);
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(req.params.id, req.body, { new: true }).select('-password');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ============================================
 // PROJECT ENDPOINTS
 // ============================================
 
-app.get('/api/projects', (req, res) => {
-  res.json(projects);
-});
+app.get('/api/projects', async (req, res) => {
+  try {
+    const projects = await Project.find().sort({ createdAt: -1 });
 
-app.get('/api/projects/:id', (req, res) => {
-  const project = projects.find(p => p.id === req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-  res.json(project);
-});
+    // Add task counts and progress for each project
+    const projectsWithStats = await Promise.all(projects.map(async (project) => {
+      const tasks = await Task.find({ projectId: project._id });
+      const doneTasks = tasks.filter(t => t.status === 'done').length;
+      const progress = tasks.length > 0 ? Math.round((doneTasks / tasks.length) * 100) : 0;
 
-app.post('/api/projects', (req, res) => {
-  const { name, description, ownerId } = req.body;
+      return {
+        ...project.toObject(),
+        taskCount: tasks.length,
+        progress,
+        memberCount: project.members?.length || 1
+      };
+    }));
 
-  if (!name) {
-    return res.status(400).json({ error: 'Project name is required' });
+    res.json(projectsWithStats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const newProject = {
-    id: generateId(),
-    name,
-    description: description || '',
-    ownerId: ownerId || '1',
-    members: [ownerId || '1'],
-    createdAt: new Date().toISOString()
-  };
-
-  projects.push(newProject);
-  res.status(201).json(newProject);
 });
 
-app.put('/api/projects/:id', (req, res) => {
-  const index = projects.findIndex(p => p.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Project not found' });
-
-  projects[index] = { ...projects[index], ...req.body, id: req.params.id };
-  res.json(projects[index]);
+app.get('/api/projects/:id', async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    res.json(project);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.delete('/api/projects/:id', (req, res) => {
-  const index = projects.findIndex(p => p.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Project not found' });
+app.post('/api/projects', async (req, res) => {
+  try {
+    const { name, description, color } = req.body;
 
-  projects.splice(index, 1);
-  // Also delete associated tasks
-  tasks = tasks.filter(t => t.projectId !== req.params.id);
-  res.status(204).send();
+    if (!name) {
+      return res.status(400).json({ error: 'Project name is required' });
+    }
+
+    const project = await Project.create({
+      name,
+      description: description || '',
+      color: color || '#f97316'
+    });
+
+    // Log activity
+    await Activity.create({
+      type: 'project_created',
+      description: `Project "${name}" was created`,
+      icon: '📁',
+      color: color || '#f97316',
+      projectId: project._id
+    });
+
+    res.status(201).json(project);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/projects/:id', async (req, res) => {
+  try {
+    const project = await Project.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    res.json(project);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/projects/:id', async (req, res) => {
+  try {
+    const project = await Project.findByIdAndDelete(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    // Delete associated tasks
+    await Task.deleteMany({ projectId: req.params.id });
+
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ============================================
 // TASK ENDPOINTS
 // ============================================
 
-app.get('/api/tasks', (req, res) => {
-  const { projectId, status, priority, assigneeId } = req.query;
-  let filtered = tasks;
+app.get('/api/tasks', async (req, res) => {
+  try {
+    const { projectId, status, priority } = req.query;
+    const filter = {};
 
-  if (projectId) filtered = filtered.filter(t => t.projectId === projectId);
-  if (status) filtered = filtered.filter(t => t.status === status);
-  if (priority) filtered = filtered.filter(t => t.priority === priority);
-  if (assigneeId) filtered = filtered.filter(t => t.assigneeId === assigneeId);
+    if (projectId) filter.projectId = projectId;
+    if (status) filter.status = status;
+    if (priority) filter.priority = priority;
 
-  res.json(filtered);
-});
-
-app.get('/api/tasks/:id', (req, res) => {
-  const task = tasks.find(t => t.id === req.params.id);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  res.json(task);
-});
-
-app.post('/api/tasks', (req, res) => {
-  const { projectId, title, description, status, priority, tag, assigneeId } = req.body;
-
-  if (!projectId || !title) {
-    return res.status(400).json({ error: 'Project ID and title are required' });
+    const tasks = await Task.find(filter).sort({ createdAt: -1 });
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const project = projects.find(p => p.id === projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-
-  const newTask = {
-    id: generateId(),
-    projectId,
-    title,
-    description: description || '',
-    status: status || 'todo',
-    priority: priority || 'medium',
-    tag: tag || 'feature',
-    assigneeId: assigneeId || null,
-    createdAt: new Date().toISOString()
-  };
-
-  tasks.push(newTask);
-  res.status(201).json(newTask);
 });
 
-app.put('/api/tasks/:id', (req, res) => {
-  const index = tasks.findIndex(t => t.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Task not found' });
-
-  tasks[index] = {
-    ...tasks[index],
-    ...req.body,
-    id: req.params.id,
-    updatedAt: new Date().toISOString()
-  };
-  res.json(tasks[index]);
-});
-
-app.patch('/api/tasks/:id/status', (req, res) => {
-  const { status } = req.body;
-  const validStatuses = ['todo', 'inProgress', 'review', 'done'];
-
-  if (!status || !validStatuses.includes(status)) {
-    return res.status(400).json({ error: 'Valid status required: ' + validStatuses.join(', ') });
+app.get('/api/tasks/:id', async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json(task);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const index = tasks.findIndex(t => t.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Task not found' });
-
-  tasks[index].status = status;
-  tasks[index].updatedAt = new Date().toISOString();
-  res.json(tasks[index]);
 });
 
-app.delete('/api/tasks/:id', (req, res) => {
-  const index = tasks.findIndex(t => t.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Task not found' });
+app.post('/api/tasks', async (req, res) => {
+  try {
+    const { projectId, title, description, status, priority, tag, assignee } = req.body;
 
-  tasks.splice(index, 1);
-  res.status(204).send();
+    if (!projectId || !title) {
+      return res.status(400).json({ error: 'Project ID and title are required' });
+    }
+
+    const project = await Project.findById(projectId);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const task = await Task.create({
+      projectId,
+      title,
+      description: description || '',
+      status: status || 'todo',
+      priority: priority || 'medium',
+      tag: tag || 'feature',
+      assignee: assignee || null
+    });
+
+    // Log activity
+    await Activity.create({
+      type: 'task_created',
+      description: `Task "${title}" was created`,
+      icon: '✨',
+      color: '#4ade80',
+      projectId,
+      taskId: task._id
+    });
+
+    res.status(201).json(task);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/tasks/:id', async (req, res) => {
+  try {
+    const task = await Task.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json(task);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/tasks/:id/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ['todo', 'inProgress', 'review', 'done'];
+
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Valid status required: ' + validStatuses.join(', ') });
+    }
+
+    const task = await Task.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    // Log activity
+    const statusLabels = { todo: 'To Do', inProgress: 'In Progress', review: 'Review', done: 'Done' };
+    await Activity.create({
+      type: 'task_moved',
+      description: `Task "${task.title}" moved to ${statusLabels[status]}`,
+      icon: '🔄',
+      color: status === 'done' ? '#4ade80' : '#fbbf24',
+      taskId: task._id
+    });
+
+    res.json(task);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/tasks/:id', async (req, res) => {
+  try {
+    const task = await Task.findByIdAndDelete(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ============================================
 // DASHBOARD STATS ENDPOINT
 // ============================================
 
-app.get('/api/dashboard/stats', (req, res) => {
-  const tasksByStatus = {
-    todo: tasks.filter(t => t.status === 'todo').length,
-    inProgress: tasks.filter(t => t.status === 'inProgress').length,
-    review: tasks.filter(t => t.status === 'review').length,
-    done: tasks.filter(t => t.status === 'done').length
-  };
+app.get('/api/dashboard/stats', async (req, res) => {
+  try {
+    const [totalTasks, totalProjects, totalUsers, todoCount, inProgressCount, reviewCount, doneCount] = await Promise.all([
+      Task.countDocuments(),
+      Project.countDocuments(),
+      User.countDocuments(),
+      Task.countDocuments({ status: 'todo' }),
+      Task.countDocuments({ status: 'inProgress' }),
+      Task.countDocuments({ status: 'review' }),
+      Task.countDocuments({ status: 'done' })
+    ]);
 
-  const tasksByPriority = {
-    urgent: tasks.filter(t => t.priority === 'urgent').length,
-    high: tasks.filter(t => t.priority === 'high').length,
-    medium: tasks.filter(t => t.priority === 'medium').length,
-    low: tasks.filter(t => t.priority === 'low').length
-  };
+    const tasksByStatus = { todo: todoCount, inProgress: inProgressCount, review: reviewCount, done: doneCount };
 
-  res.json({
-    totalTasks: tasks.length,
-    totalProjects: projects.length,
-    totalUsers: users.length,
-    tasksByStatus,
-    tasksByPriority,
-    completionRate: tasks.length > 0 ? (tasksByStatus.done / tasks.length * 100).toFixed(1) : 0,
-    deploymentVersion: APP_VERSION,
-    deploymentStrategy: DEPLOYMENT_STRATEGY
-  });
+    const [urgentCount, highCount, mediumCount, lowCount] = await Promise.all([
+      Task.countDocuments({ priority: 'urgent' }),
+      Task.countDocuments({ priority: 'high' }),
+      Task.countDocuments({ priority: 'medium' }),
+      Task.countDocuments({ priority: 'low' })
+    ]);
+
+    const tasksByPriority = { urgent: urgentCount, high: highCount, medium: mediumCount, low: lowCount };
+
+    res.json({
+      totalTasks,
+      totalProjects,
+      totalUsers,
+      tasksByStatus,
+      tasksByPriority,
+      completionRate: totalTasks > 0 ? ((doneCount / totalTasks) * 100).toFixed(1) : 0,
+      deploymentVersion: APP_VERSION,
+      deploymentStrategy: DEPLOYMENT_STRATEGY
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// RECENT ACTIVITY ENDPOINT
+// ============================================
+
+app.get('/api/activities', async (req, res) => {
+  try {
+    const activities = await Activity.find()
+      .sort({ createdAt: -1 })
+      .limit(10);
+    res.json(activities);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// TASK COMMENTS ENDPOINTS
+// ============================================
+
+app.get('/api/tasks/:taskId/comments', async (req, res) => {
+  try {
+    const comments = await Comment.find({ taskId: req.params.taskId })
+      .sort({ createdAt: -1 })
+      .limit(50);
+    res.json(comments);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/tasks/:taskId/comments', async (req, res) => {
+  try {
+    const { author, content } = req.body;
+    if (!content) return res.status(400).json({ error: 'Comment content is required' });
+
+    const task = await Task.findById(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const comment = await Comment.create({
+      taskId: req.params.taskId,
+      author: author || (req.user ? req.user.email : 'Anonymous'),
+      content,
+    });
+
+    await Activity.create({
+      type: 'comment_added',
+      description: `Comment added on "${task.title}"`,
+      icon: '💬',
+      color: '#3b82f6',
+      taskId: task._id,
+    });
+
+    res.status(201).json(comment);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/comments/:id', async (req, res) => {
+  try {
+    const comment = await Comment.findByIdAndDelete(req.params.id);
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// SEARCH ENDPOINT
+// ============================================
+
+app.get('/api/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) return res.json({ tasks: [], projects: [] });
+
+    const regex = new RegExp(q, 'i');
+
+    const [tasks, projects] = await Promise.all([
+      Task.find({
+        $or: [{ title: regex }, { description: regex }, { assignee: regex }, { tag: regex }]
+      }).limit(20),
+      Project.find({
+        $or: [{ name: regex }, { description: regex }]
+      }).limit(10),
+    ]);
+
+    res.json({ tasks, projects });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ============================================
@@ -421,6 +790,15 @@ app.get('/', (req, res) => {
         }
         h1 { font-size: 2.5rem; margin-bottom: 1rem; }
         .subtitle { color: #94a3b8; margin-bottom: 2rem; font-size: 1.1rem; }
+        .db-status { 
+          padding: 8px 16px; 
+          border-radius: 20px; 
+          display: inline-block;
+          margin-bottom: 1.5rem;
+          font-size: 0.9rem;
+        }
+        .db-connected { background: #22c55e20; color: #22c55e; border: 1px solid #22c55e40; }
+        .db-disconnected { background: #ef444420; color: #ef4444; border: 1px solid #ef444440; }
         .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 2rem; }
         .stat { background: rgba(255,255,255,0.1); padding: 1rem; border-radius: 12px; }
         .stat-value { font-size: 2rem; font-weight: 700; color: ${versionColor}; }
@@ -437,17 +815,21 @@ app.get('/', (req, res) => {
         <h1>TaskFlow Pro API</h1>
         <p class="subtitle">Project Management Backend Service<br/>Strategy: <strong>${DEPLOYMENT_STRATEGY}</strong></p>
         
+        <div class="db-status ${isDbConnected ? 'db-connected' : 'db-disconnected'}">
+          ${isDbConnected ? '✅ MongoDB Connected' : '⚠️ MongoDB Disconnected'}
+        </div>
+        
         <div class="stats">
           <div class="stat">
-            <div class="stat-value">${users.length}</div>
+            <div class="stat-value" id="users">-</div>
             <div class="stat-label">Users</div>
           </div>
           <div class="stat">
-            <div class="stat-value">${projects.length}</div>
+            <div class="stat-value" id="projects">-</div>
             <div class="stat-label">Projects</div>
           </div>
           <div class="stat">
-            <div class="stat-value">${tasks.length}</div>
+            <div class="stat-value" id="tasks">-</div>
             <div class="stat-label">Tasks</div>
           </div>
         </div>
@@ -455,17 +837,32 @@ app.get('/', (req, res) => {
         <div class="endpoints">
           <h3>📡 API Endpoints</h3>
           <div class="endpoint"><span>GET</span> /api/status</div>
-          <div class="endpoint"><span>GET</span> /api/projects</div>
-          <div class="endpoint"><span>GET</span> /api/tasks</div>
+          <div class="endpoint"><span>POST</span> /api/auth/register (bcrypt + JWT)</div>
+          <div class="endpoint"><span>POST</span> /api/auth/login (bcrypt + JWT)</div>
+          <div class="endpoint"><span>GET/POST</span> /api/projects</div>
+          <div class="endpoint"><span>GET/POST</span> /api/tasks</div>
+          <div class="endpoint"><span>PATCH</span> /api/tasks/:id/status</div>
+          <div class="endpoint"><span>GET/POST</span> /api/tasks/:id/comments</div>
+          <div class="endpoint"><span>GET</span> /api/search?q=query</div>
           <div class="endpoint"><span>GET</span> /api/dashboard/stats</div>
-          <div class="endpoint"><span>GET</span> /health</div>
-          <div class="endpoint"><span>GET</span> /metrics</div>
+          <div class="endpoint"><span>GET</span> /api/activities</div>
+          <div class="endpoint"><span>GET</span> /metrics (Prometheus)</div>
         </div>
         
         <p style="margin-top: 2rem; color: #64748b; font-size: 0.875rem;">
           Uptime: ${Math.floor(process.uptime())}s | Version: 1.0.0
         </p>
       </div>
+      <script>
+        fetch('/api/status')
+          .then(r => r.json())
+          .then(data => {
+            document.getElementById('users').textContent = data.stats.users;
+            document.getElementById('projects').textContent = data.stats.projects;
+            document.getElementById('tasks').textContent = data.stats.tasks;
+          })
+          .catch(() => {});
+      </script>
     </body>
     </html>
   `);

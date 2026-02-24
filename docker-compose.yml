@@ -1,185 +1,231 @@
-# TaskFlow Pro - CI/CD Pipeline Demo Application
-# Docker Compose for local development and testing
+# Complete TaskFlow Pro + CI/CD Dashboard - Docker Compose
+# This file sets up EVERYTHING needed for full deployment demonstration
+# Run with: docker-compose up -d
 
 version: '3.8'
 
 services:
-  # ==========================================
-  # FRONTEND SERVICE (React/Vite)
-  # ==========================================
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_APP_VERSION: ${APP_VERSION:-stable}
-        VITE_DEPLOYMENT_STRATEGY: ${DEPLOYMENT_STRATEGY:-standard}
-    ports:
-      - "3000:80"
-    environment:
-      - NODE_ENV=production
-    depends_on:
-      - backend
-    healthcheck:
-      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    networks:
-      - taskflow-network
-    labels:
-      - "app.version=${APP_VERSION:-stable}"
-      - "app.strategy=${DEPLOYMENT_STRATEGY:-standard}"
-
-  # ==========================================
-  # BACKEND API SERVICE (Node.js/Express)
-  # ==========================================
-  backend:
-    build:
-      context: ./app
-      dockerfile: Dockerfile
-    ports:
-      - "4000:3000"
-    environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - APP_VERSION=${APP_VERSION:-stable}
-      - DEPLOYMENT_STRATEGY=${DEPLOYMENT_STRATEGY:-standard}
-      - MONGO_URI=mongodb://mongodb:27017/taskflow
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    networks:
-      - taskflow-network
-    labels:
-      - "app.version=${APP_VERSION:-stable}"
-      - "app.strategy=${DEPLOYMENT_STRATEGY:-standard}"
-
-  # ==========================================
-  # MONGODB DATABASE
-  # ==========================================
+  # ==========================================================
+  # MONGODB DATABASE - For TaskFlow Pro data persistence
+  # ==========================================================
   mongodb:
     image: mongo:7-jammy
+    container_name: taskflow-mongodb
     ports:
       - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: taskflow123
+      MONGO_INITDB_DATABASE: taskflow
     volumes:
       - mongodb_data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     healthcheck:
       test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
     networks:
       - taskflow-network
 
-  # ==========================================
-  # BLUE VERSION (for Blue-Green deployment demo)
-  # ==========================================
-  frontend-blue:
+  # ==========================================================
+  # TASKFLOW PRO - FRONTEND (Stable/Production)
+  # ==========================================================
+  taskflow-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_APP_VERSION: stable
+        VITE_DEPLOYMENT_STRATEGY: standard
+    image: ruthik005/taskflow-frontend:stable
+    container_name: taskflow-frontend
+    ports:
+      - "3001:80"
+    depends_on:
+      - taskflow-api
+    networks:
+      - taskflow-network
+    labels:
+      - "deployment.version=stable"
+      - "deployment.strategy=standard"
+
+  # ==========================================================
+  # TASKFLOW PRO - API BACKEND (Stable/Production)
+  # ==========================================================
+  taskflow-api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: stable
+        DEPLOYMENT_STRATEGY: standard
+    image: ruthik005/taskflow-api:stable
+    container_name: taskflow-api
+    ports:
+      - "3002:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - APP_VERSION=stable
+      - DEPLOYMENT_STRATEGY=standard
+      - MONGO_URI=mongodb://admin:taskflow123@mongodb:27017/taskflow?authSource=admin
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - taskflow-network
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider", "http://localhost:3000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "deployment.version=stable"
+      - "deployment.strategy=standard"
+
+  # ==========================================================
+  # BLUE VERSION - For Blue-Green Deployment Demo
+  # ==========================================================
+  taskflow-frontend-blue:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_APP_VERSION: blue
         VITE_DEPLOYMENT_STRATEGY: blue-green
+    image: ruthik005/taskflow-frontend:blue
+    container_name: taskflow-frontend-blue
     ports:
-      - "3001:80"
-    networks:
-      - taskflow-network
+      - "3003:80"
     profiles:
       - blue-green
+    networks:
+      - taskflow-network
     labels:
-      - "app.version=blue"
-      - "app.strategy=blue-green"
+      - "deployment.version=blue"
+      - "deployment.strategy=blue-green"
 
-  backend-blue:
+  taskflow-api-blue:
     build:
       context: ./app
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: blue
+        DEPLOYMENT_STRATEGY: blue-green
+    image: ruthik005/taskflow-api:blue
+    container_name: taskflow-api-blue
     ports:
-      - "4001:3000"
+      - "3004:3000"
     environment:
       - APP_VERSION=blue
       - DEPLOYMENT_STRATEGY=blue-green
-      - PORT=3000
-    networks:
-      - taskflow-network
+      - MONGO_URI=mongodb://admin:taskflow123@mongodb:27017/taskflow?authSource=admin
     profiles:
       - blue-green
+    depends_on:
+      - mongodb
+    networks:
+      - taskflow-network
     labels:
-      - "app.version=blue"
-      - "app.strategy=blue-green"
+      - "deployment.version=blue"
+      - "deployment.strategy=blue-green"
 
-  # ==========================================
-  # GREEN VERSION (for Blue-Green deployment demo)
-  # ==========================================
-  frontend-green:
+  # ==========================================================
+  # GREEN VERSION - For Blue-Green Deployment Demo
+  # ==========================================================
+  taskflow-frontend-green:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_APP_VERSION: green
         VITE_DEPLOYMENT_STRATEGY: blue-green
+    image: ruthik005/taskflow-frontend:green
+    container_name: taskflow-frontend-green
     ports:
-      - "3002:80"
-    networks:
-      - taskflow-network
+      - "3005:80"
     profiles:
       - blue-green
+    networks:
+      - taskflow-network
     labels:
-      - "app.version=green"
-      - "app.strategy=blue-green"
+      - "deployment.version=green"
+      - "deployment.strategy=blue-green"
 
-  backend-green:
+  taskflow-api-green:
     build:
       context: ./app
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: green
+        DEPLOYMENT_STRATEGY: blue-green
+    image: ruthik005/taskflow-api:green
+    container_name: taskflow-api-green
     ports:
-      - "4002:3000"
+      - "3006:3000"
     environment:
       - APP_VERSION=green
       - DEPLOYMENT_STRATEGY=blue-green
-      - PORT=3000
-    networks:
-      - taskflow-network
+      - MONGO_URI=mongodb://admin:taskflow123@mongodb:27017/taskflow?authSource=admin
     profiles:
       - blue-green
+    depends_on:
+      - mongodb
+    networks:
+      - taskflow-network
     labels:
-      - "app.version=green"
-      - "app.strategy=blue-green"
+      - "deployment.version=green"
+      - "deployment.strategy=blue-green"
 
-  # ==========================================
-  # CANARY VERSION (for Canary deployment demo)
-  # ==========================================
-  frontend-canary:
+  # ==========================================================
+  # CANARY VERSION - For Canary Deployment Demo
+  # ==========================================================
+  taskflow-frontend-canary:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_APP_VERSION: canary
         VITE_DEPLOYMENT_STRATEGY: canary
+    image: ruthik005/taskflow-frontend:canary
+    container_name: taskflow-frontend-canary
     ports:
-      - "3003:80"
-    networks:
-      - taskflow-network
+      - "3007:80"
     profiles:
       - canary
+    networks:
+      - taskflow-network
     labels:
-      - "app.version=canary"
-      - "app.strategy=canary"
+      - "deployment.version=canary"
+      - "deployment.strategy=canary"
+      - "canary.weight=10"
 
+  # ==========================================================
+  # CI/CD APP (Original Pipeline App)
+  # ==========================================================
+  ci-cd-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: ruthik005/ci-cd-app:latest
+    container_name: ci-cd-app
+    ports:
+      - "3010:3000"
+    environment:
+      - NODE_ENV=production
+      - APP_VERSION=latest
+    networks:
+      - taskflow-network
+
+# ==========================================================
+# VOLUMES & NETWORKS
+# ==========================================================
 volumes:
   mongodb_data:
-    driver: local
+    name: taskflow-mongodb-data
 
 networks:
   taskflow-network:
     driver: bridge
+    name: taskflow-network
